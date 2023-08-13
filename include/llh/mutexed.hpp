@@ -155,11 +155,9 @@ private:
         std::shared_lock<mutex_wrapper<M>>
     >;
 
-    // Creates a lock guard for the purposes of waiting on a condition variable.
+    // Creates a lock guard that uses lock_shared() except if M==std::mutex.
     // Mendatory copy elision makes `auto lock = wait_lock();` only lock the mutex once
-    template<class = void>
-    requires std::is_same_v<H, has_cv>
-    auto wait_lock() const {
+    auto possibly_shared_lock() const {
         if constexpr (std::is_same_v<M, std::mutex>)
             return std::unique_lock(this->mtx_);
         else
@@ -203,21 +201,46 @@ public:
     template<typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     void wait(Predicate&& p) const {
-        auto lock = wait_lock();
+        auto lock = possibly_shared_lock();
         this->cv_.wait(lock, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
     template<class Rep, class Period, typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     bool wait_for(std::chrono::duration<Rep, Period> const& rel_time, Predicate&& p) const {
-        auto lock = wait_lock();
+        auto lock = possibly_shared_lock();
         return this->cv_.wait_for(lock, rel_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
     template<class Clock, class Duration, typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     bool wait_until(std::chrono::time_point<Clock, Duration> const& timeout_time, Predicate&& p) const {
-        auto lock = wait_lock();
+        auto lock = possibly_shared_lock();
         return this->cv_.wait_until(lock, timeout_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
+    }
+
+
+    decltype(auto) locked() {
+        struct Lock {
+            Mutexed& m;
+
+            explicit Lock(Mutexed& mtx) : m(mtx) {
+                m.mtx_.lock();
+            }
+
+            ~Lock() {
+                m.mtx_.unlock();
+                if constexpr (std::is_same_v<H, has_cv>) {
+                    m.cv_.notify_all();
+                }
+            }
+        };
+        return std::tuple<Lock, T&>(*this, val_);
+    }
+    decltype(auto) locked() const {
+        return std::tuple<decltype(possibly_shared_lock()), T const&>(possibly_shared_lock(), val_);
+    }
+    decltype(auto) locked_const() const {
+        return locked();
     }
 };
