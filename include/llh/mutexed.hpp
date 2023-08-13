@@ -1,7 +1,6 @@
 #include <condition_variable>
 #include <shared_mutex>
 #include <mutex>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <functional>
@@ -20,45 +19,64 @@ concept shared_lockable = requires(M& m) {
 
 struct mutexed_tag {};
 
+template<typename T>
+struct decay_through_ref_wrap {
+    using type = std::decay_t<T>;
+};
+
+template<typename T>
+struct decay_through_ref_wrap<std::reference_wrapper<T>> {
+    using type = std::decay_t<T>;
+};
+
+template<typename T>
+using decay_through_ref_wrap_t = typename decay_through_ref_wrap<T>::type;
+
+
 inline struct all_locker {
     template<typename M>
     struct lockable_proxy {
         M& m;
 
-        void lock() { m.lock(); }
-        void unlock() { m.unlock(); }
-        bool try_lock() { return m.try_lock(); }
+        void lock() { m.mtx_.lock(); }
+        void unlock() { m.mtx_.unlock(); }
+        bool try_lock() { return m.mtx_.try_lock(); }
+
+        auto& inner_val_ref() { return m.val_; }
     };
 
     template<typename M>
-    requires shared_lockable<M>
+    requires shared_lockable<typename M::mutex_type>
     struct lockable_proxy<M const> {
-    private:
         M& m;
-    public:
-        
+
         explicit lockable_proxy(M const& c_m) : m(const_cast<M&>(c_m)) {}
 
-        void lock() { m.lock_shared(); }
-        void unlock() { m.unlock_shared(); }
-        bool try_lock() { return m.try_lock_shared(); }
+        void lock() { m.mtx_.lock_shared(); }
+        void unlock() { m.mtx_.unlock_shared(); }
+        bool try_lock() { return m.mtx_.try_lock_shared(); }
+
+        auto const& inner_val_ref() { return m.val_; }
     };
 
+    template<typename M> lockable_proxy(std::reference_wrapper<M>) -> lockable_proxy<M>;
+    template<typename M> lockable_proxy(M&) -> lockable_proxy<M>;
+
     template<typename F, typename... M>
-    requires std::conjunction_v<std::is_base_of<mutexed_tag, std::decay_t<M>>...>
-    decltype(auto) operator()(F&& f, M&... mtxs) const {
-        return [&](lockable_proxy<M>&&... m) {
-            std::scoped_lock<lockable_proxy<M>...> lock(m...);
-            return std::invoke(std::forward<F>(f), mtxs.val_...);
-        }(lockable_proxy<M>{mtxs}...);
+    requires std::conjunction_v<std::is_base_of<mutexed_tag, decay_through_ref_wrap_t<M>>...>
+    decltype(auto) operator()(F&& f, M&&... mtxs) const {
+        return [](auto&& f, auto&&... mp) {
+            std::scoped_lock<std::decay_t<decltype(mp)>...> lock(mp...);
+            return std::invoke(std::forward<F>(f), mp.inner_val_ref()...);
+        }(std::forward<F>(f), lockable_proxy{std::forward<M>(mtxs)}...);
     }
-} with_unlocked{};
+} with_all_locked{};
 
 
 template<typename M>
 struct mutex_wrapper {
     M mutable mtx_;
-    
+
     using lock_type = std::unique_lock<M>;
 
     void lock_shared()     { mtx_.lock(); }
@@ -73,7 +91,7 @@ template<typename M>
 requires shared_lockable<M>
 struct mutex_wrapper<M> {
     M mutable mtx_;
-    
+
     using lock_type = std::shared_lock<M>;
 
     void lock_shared()     { mtx_.lock_shared(); }
@@ -104,24 +122,14 @@ template<typename T, typename M = std::shared_mutex, typename H = no_cv>
 class Mutexed : public mutexed_tag, private mutexed_base<M, H> {
 private:
     T val_;
-    
+
     friend all_locker;
-    
+
     mutex_wrapper<M>& as_wrapper() const {
         // mutex_wrapper just wraps a mutable mutex so its methods are callable in const contexts
         return *const_cast<Mutexed*>(this);
     }
-    
-    template<typename Self>
-    static decltype(auto) as_shared_if_const(Self& self) {
-        if constexpr (shared_lockable<M> && std::is_same_v<Self, Self const>) {
-            return self.as_wrapper();
-        }
-        else {
-            return self.mtx_;
-        }
-    }
-    
+
     template<typename DoesNotHaveCV>
     struct defer_notify{
         template<typename Ignored>
@@ -132,22 +140,39 @@ private:
     requires requires(HasCV& m) { m.cv_; }
     struct defer_notify<HasCV> {
         decltype(std::declval<HasCV>().cv_)& cv_;
-        
+
         explicit defer_notify(HasCV const& m) : cv_(m.cv_) {}
 
         ~defer_notify() {
             cv_.notify_all();
         }
     };
-    
+
     using notifier = defer_notify<Mutexed>;
-    
+    using wait_lock_type = std::conditional_t<
+        std::is_same_v<M, std::mutex>,
+        std::unique_lock<mutex_wrapper<M>>,
+        std::shared_lock<mutex_wrapper<M>>
+    >;
+
+    // Creates a lock guard for the purposes of waiting on a condition variable.
+    // Mendatory copy elision makes `auto lock = wait_lock();` only lock the mutex once
+    template<class = void>
+    requires std::is_same_v<H, has_cv>
+    auto wait_lock() const {
+        if constexpr (std::is_same_v<M, std::mutex>)
+            return std::unique_lock(this->mtx_);
+        else
+            return std::shared_lock(as_wrapper());
+    }
+
 public:
     using value_type = T;
+    using mutex_type = M;
 
     Mutexed(Mutexed&&) = delete;
     Mutexed(Mutexed const&) = delete;
-    
+
     template<typename... Args>
     explicit Mutexed(Args... args) : val_(std::forward<Args>(args)...) {}
 
@@ -155,17 +180,17 @@ public:
     requires
         invokable_with<F, T const&> ||
         invokable_with<F, T> && std::is_copy_constructible_v<T>
-    decltype(auto) with_unlocked(F&& f) const {
+    decltype(auto) with_locked(F&& f) const {
         std::shared_lock lock(as_wrapper());
-        return std::invoke(std::forward<F>(f), std::cref(val_).get());
+        return std::invoke(std::forward<F>(f), val_);
     }
 
     template<typename F>
     requires invokable_with<F, T&>
-    decltype(auto) with_unlocked(F&& f) {
+    decltype(auto) with_locked(F&& f) {
         notifier dn(*this);
-        std::lock_guard<M> lock(this->mtx_);
-        return std::invoke(f, std::ref(val_).get());
+        std::lock_guard lock(this->mtx_);
+        return std::invoke(f, val_);
     }
 
     template<typename = void>
@@ -178,13 +203,21 @@ public:
     template<typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     void wait(Predicate&& p) const {
-        std::unique_lock<M> lock(this->mtx_);
+        auto lock = wait_lock();
         this->cv_.wait(lock, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
-    template<typename F>
-    requires std::is_same_v<H, has_cv> && invokable_with<F, T&>
-    decltype(auto) with_unlocked_notify(F&& f) {
-        return with_unlocked(std::forward<F>(f));
+    template<class Rep, class Period, typename Predicate>
+    requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
+    bool wait_for(std::chrono::duration<Rep, Period> const& rel_time, Predicate&& p) const {
+        auto lock = wait_lock();
+        return this->cv_.wait_for(lock, rel_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
+    }
+
+    template<class Clock, class Duration, typename Predicate>
+    requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
+    bool wait_until(std::chrono::time_point<Clock, Duration> const& timeout_time, Predicate&& p) const {
+        auto lock = wait_lock();
+        return this->cv_.wait_until(lock, timeout_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 };
