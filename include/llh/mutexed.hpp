@@ -1,9 +1,14 @@
+#pragma once
+
 #include <condition_variable>
 #include <shared_mutex>
 #include <mutex>
 #include <type_traits>
 #include <utility>
 #include <functional>
+
+namespace llh::mutexed {
+namespace details {
 
 template<typename F, typename A>
 concept invokable_with = requires (F&& f, A a) {
@@ -244,3 +249,13 @@ public:
         return locked();
     }
 };
+
+} // end namespace details
+
+using details::Mutexed;
+using details::has_cv;
+using details::no_cv;
+
+inline details::all_locker with_all_locked{};
+
+} // end namespace llh::mutexed

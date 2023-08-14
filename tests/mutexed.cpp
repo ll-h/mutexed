@@ -1,4 +1,3 @@
-#include <memory>
 #define BOOST_TEST_MODULE Mutexed
 #define BOOST_TEST_DYN_LINK
 #include <boost/test/unit_test.hpp>
@@ -12,6 +11,8 @@
 #include <chrono>
 
 #include "mutexed.hpp"
+
+using namespace llh::mutexed;
 
 
 BOOST_AUTO_TEST_SUITE(APITests)
