@@ -78,62 +78,42 @@ inline struct all_locker {
 } with_all_locked{};
 
 
-template<typename M>
-struct mutex_wrapper {
-    M mutable mtx_;
-
-    using lock_type = std::unique_lock<M>;
-
-    void lock_shared()     { mtx_.lock(); }
-    void lock()            { mtx_.lock(); }
-    void unlock()          { mtx_.unlock(); }
-    void unlock_shared()   { mtx_.unlock(); }
-    bool try_lock_shared() { return mtx_.try_lock(); }
-    bool try_lock()        { return mtx_.try_lock(); }
-};
-
-template<typename M>
-requires shared_lockable<M>
-struct mutex_wrapper<M> {
-    M mutable mtx_;
-
-    using lock_type = std::shared_lock<M>;
-
-    void lock_shared()     { mtx_.lock_shared(); }
-    void lock()            { mtx_.lock_shared(); }
-    void unlock()          { mtx_.unlock_shared(); }
-    void unlock_shared()   { mtx_.unlock_shared(); }
-    bool try_lock_shared() { return mtx_.try_lock_shared(); }
-    bool try_lock()        { return mtx_.try_lock_shared(); }
-};
-
 struct has_cv {};
 struct no_cv {};
 
 template<typename M, typename H = no_cv>
-struct mutexed_base : mutex_wrapper<M> {};
+struct mutexed_base{};
 
 template<typename M>
-struct mutexed_base<M, has_cv> : mutex_wrapper<M> {
+struct mutexed_base<M, has_cv> {
     std::condition_variable_any mutable cv_;
 };
 
 template<>
-struct mutexed_base<std::mutex, has_cv> : mutex_wrapper<std::mutex> {
+struct mutexed_base<std::mutex, has_cv> {
     std::condition_variable mutable cv_;
 };
+
+/** tag used to provide arguments for the in-place construction of the inner mutex */
+struct mutex_args_t{};
+/** tag used to provide arguments for the in-place construction of the mutexed value */
+struct value_args_t{};
+
+template<typename Tag, typename... MutexArgs>
+constexpr bool contains_tag() {
+    return ((std::is_same_v<std::decay_t<MutexArgs>, Tag>) || ...);
+}
+
+template<typename Tag, typename... T>
+concept does_not_contain_tag = !contains_tag<Tag, T...>();
 
 template<typename T, typename M = std::shared_mutex, typename H = no_cv>
 class Mutexed : public mutexed_tag, private mutexed_base<M, H> {
 private:
+    M mutable mtx_;
     T val_;
 
     friend all_locker;
-
-    mutex_wrapper<M>& as_wrapper() const {
-        // mutex_wrapper just wraps a mutable mutex so its methods are callable in const contexts
-        return *const_cast<Mutexed*>(this);
-    }
 
     template<typename DoesNotHaveCV>
     struct defer_notify{
@@ -154,37 +134,51 @@ private:
     };
 
     using notifier = defer_notify<Mutexed>;
-    using wait_lock_type = std::conditional_t<
-        std::is_same_v<M, std::mutex>,
-        std::unique_lock<mutex_wrapper<M>>,
-        std::shared_lock<mutex_wrapper<M>>
-    >;
 
-    // Creates a lock guard that uses lock_shared() except if M==std::mutex.
-    // Mendatory copy elision makes `auto lock = wait_lock();` only lock the mutex once
-    auto possibly_shared_lock() const {
-        if constexpr (std::is_same_v<M, std::mutex>)
-            return std::unique_lock(this->mtx_);
-        else
-            return std::shared_lock(as_wrapper());
-    }
+    using wait_lock = std::conditional_t<
+        std::is_same_v<M, std::mutex> || !shared_lockable<M>,
+        std::unique_lock<M>,
+        std::shared_lock<M>
+    >;
 
 public:
     using value_type = T;
     using mutex_type = M;
 
+    /** A shared_lock<M> if M is shared_lockable, a unique_lock<M> otherwise */
+    using possibly_shared_lock = std::conditional_t<
+        shared_lockable<M>,
+        std::shared_lock<M>,
+        std::unique_lock<M>
+    >;
+
     Mutexed(Mutexed&&) = delete;
     Mutexed(Mutexed const&) = delete;
 
-    template<typename... Args>
-    explicit Mutexed(Args... args) : val_(std::forward<Args>(args)...) {}
+    template<typename... ValueArgs>
+    requires does_not_contain_tag<mutex_args_t, ValueArgs...> &&
+        std::is_constructible_v<T, ValueArgs&&...>
+    explicit Mutexed(ValueArgs&&... args) : mtx_(), val_(std::forward<ValueArgs>(args)...) {}
+
+    template<typename ValArg, typename MutexArg>
+    explicit Mutexed(ValArg&& v_arg, MutexArg&& m_arg) :
+        mtx_(std::forward<MutexArg>(m_arg)),
+        val_(std::forward<ValArg>(v_arg))
+    {}
+
+    template<typename... MutexArgs>
+    requires does_not_contain_tag<value_args_t, MutexArgs...>
+    explicit Mutexed(mutex_args_t, MutexArgs&&... m_args) :
+        mtx_(std::forward<MutexArgs>(m_args)...),
+        val_()
+    {}
 
     template<typename F>
     requires
         invokable_with<F, T const&> ||
         invokable_with<F, T> && std::is_copy_constructible_v<T>
     decltype(auto) with_locked(F&& f) const {
-        std::shared_lock lock(as_wrapper());
+        possibly_shared_lock lock(mtx_);
         return std::invoke(std::forward<F>(f), val_);
     }
 
@@ -192,35 +186,35 @@ public:
     requires invokable_with<F, T&>
     decltype(auto) with_locked(F&& f) {
         notifier dn(*this);
-        std::lock_guard lock(this->mtx_);
+        std::lock_guard lock(mtx_);
         return std::invoke(f, val_);
     }
 
     template<typename = void>
     requires std::is_copy_constructible_v<T>
     T get_copy() const {
-        std::shared_lock lock(as_wrapper());
+        possibly_shared_lock lock(mtx_);
         return val_;
     }
 
     template<typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     void wait(Predicate&& p) const {
-        auto lock = possibly_shared_lock();
+        wait_lock lock(mtx_);
         this->cv_.wait(lock, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
     template<class Rep, class Period, typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     bool wait_for(std::chrono::duration<Rep, Period> const& rel_time, Predicate&& p) const {
-        auto lock = possibly_shared_lock();
+        wait_lock lock(mtx_);
         return this->cv_.wait_for(lock, rel_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
     template<class Clock, class Duration, typename Predicate>
     requires std::is_same_v<H, has_cv> && invokable_with<Predicate, T const&>
     bool wait_until(std::chrono::time_point<Clock, Duration> const& timeout_time, Predicate&& p) const {
-        auto lock = possibly_shared_lock();
+        wait_lock lock(mtx_);
         return this->cv_.wait_until(lock, timeout_time, [p = std::forward<Predicate>(p), this](){ return std::invoke(p, val_); });
     }
 
@@ -229,12 +223,14 @@ public:
         struct Lock {
             Mutexed& m;
 
-            explicit Lock(Mutexed& mtx) : m(mtx) {
-                m.mtx_.lock();
-            }
+            void lock()   { m.mtx_.lock(); }
+            void unlock() { m.mtx_.unlock(); }
+            bool try_lock() { return m.mtx_.try_lock(); }
+
+            explicit Lock(Mutexed& mtx) : m(mtx) { lock(); }
 
             ~Lock() {
-                m.mtx_.unlock();
+                unlock();
                 if constexpr (std::is_same_v<H, has_cv>) {
                     m.cv_.notify_all();
                 }
@@ -242,11 +238,11 @@ public:
         };
         return std::tuple<Lock, T&>(*this, val_);
     }
-    decltype(auto) locked() const {
-        return std::tuple<decltype(possibly_shared_lock()), T const&>(possibly_shared_lock(), val_);
+    std::tuple<possibly_shared_lock, T const&> locked() const {
+        return locked_const();
     }
-    decltype(auto) locked_const() const {
-        return locked();
+    std::tuple<possibly_shared_lock, T const&> locked_const() const {
+        return std::tuple<possibly_shared_lock, T const&>{mtx_, val_};
     }
 };
 
@@ -256,6 +252,11 @@ using details::Mutexed;
 using details::has_cv;
 using details::no_cv;
 
+inline details::mutex_args_t mutex_args{};
+inline details::value_args_t value_args{};
+
 inline details::all_locker with_all_locked{};
+
+using details::shared_lockable;
 
 } // end namespace llh::mutexed

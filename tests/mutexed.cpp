@@ -17,6 +17,68 @@ using namespace llh::mutexed;
 
 BOOST_AUTO_TEST_SUITE(APITests)
 
+struct lock_stats {
+    unsigned int nb_locked = 0;
+    unsigned int nb_try_locked = 0;
+    unsigned int nb_unlocked = 0;
+    unsigned int nb_locked_shared = 0;
+    unsigned int nb_try_locked_shared = 0;
+    unsigned int nb_unlocked_shared = 0;
+
+    bool has_been_shared_locked() const {
+        return nb_locked_shared > 0 || nb_try_locked_shared > 0;
+    }
+    bool has_been_unique_locked() const {
+        return nb_locked > 0 || nb_try_locked > 0;
+    }
+};
+
+template<typename M>
+struct only_lockable_spy {
+    lock_stats& stats;
+    M mtx;
+
+    only_lockable_spy(std::reference_wrapper<lock_stats> ls) : stats(ls), mtx() {}
+
+    void lock() {
+        mtx.lock();
+        ++stats.nb_locked;
+    }
+    void unlock() {
+        mtx.unlock();
+        ++stats.nb_unlocked;
+    }
+    bool try_lock() {
+        ++stats.nb_try_locked;
+        return mtx.try_lock();
+    }
+};
+
+template<typename M>
+struct lockable_spy : only_lockable_spy<M> {
+    using only_lockable_spy<M>::only_lockable_spy;
+};
+
+template<typename M>
+requires shared_lockable<M>
+struct lockable_spy<M> : only_lockable_spy<M> {
+    using only_lockable_spy<M>::only_lockable_spy;
+
+    void lock_shared() {
+        this->mtx.lock_shared();
+        ++this->stats.nb_locked_shared;
+    }
+    void unlock_shared() {
+        this->mtx.unlock_shared();
+        ++this->stats.nb_unlocked_shared;
+    }
+    bool try_lock_shared() {
+        ++this->stats.nb_try_locked_shared;
+        return this->mtx.try_lock_shared();
+    }
+};
+
+
 BOOST_AUTO_TEST_CASE(Mutexed_GetCopy)
 {
     Mutexed<int> const mutexed(42);
@@ -36,68 +98,87 @@ BOOST_AUTO_TEST_CASE(Mutexed_WithLocked_Const)
 
 BOOST_AUTO_TEST_CASE(Mutexed_WithLocked_Mut)
 {
-    Mutexed<int> mutexed(42);
-    mutexed.with_locked([](int& value) {
+    lock_stats stats;
+    Mutexed<int, lockable_spy<std::shared_mutex>> mutexed(42, stats);
+    mutexed.with_locked([&stats](int& value) {
         BOOST_TEST(value == 42);
+        BOOST_TEST(stats.nb_locked == 1);
         value += 10;
         return value;
     });
+    BOOST_TEST(stats.nb_unlocked == 1);
+
+    BOOST_TEST(stats.nb_try_locked == 0);
+    BOOST_TEST(stats.nb_locked_shared == 0);
+    BOOST_TEST(stats.nb_unlocked_shared == 0);
+    BOOST_TEST(stats.nb_try_locked_shared == 0);
     BOOST_TEST(mutexed.get_copy() == 52);
 }
 
-BOOST_AUTO_TEST_CASE(Mutexed_Locked_Const)
+
+template<typename CallLocked>
+void test_locked_const(CallLocked&& call_locked)
 {
-    Mutexed<int> const mutexed(42);
+    lock_stats stats;
+    Mutexed<int, lockable_spy<std::shared_mutex>> mutexed(42, stats);
     {
-        auto [lock, value] = mutexed.locked();
+        auto [lock, value] = call_locked(mutexed);
         static_assert(std::is_same_v<decltype(value), int const&>);
         BOOST_TEST(value == 42);
+
+        // making sure that the lock was acquired only once
+        BOOST_TEST(stats.nb_locked_shared == 1);
     }
+    BOOST_TEST(stats.nb_unlocked_shared == 1);
+
+    BOOST_TEST(stats.nb_try_locked_shared == 0);
+    BOOST_TEST(stats.nb_locked == 0);
+    BOOST_TEST(stats.nb_unlocked == 0);
+    BOOST_TEST(stats.nb_try_locked == 0);
 }
+BOOST_AUTO_TEST_CASE(Mutexed_Locked_Const)
+{
+    test_locked_const([](auto& mutexed){
+        return mutexed.locked_const();
+    });
+}
+BOOST_AUTO_TEST_CASE(Const_Mutexed_Locked)
+{
+    test_locked_const([](auto const& mutexed){
+        return mutexed.locked();
+    });
+}
+
 
 BOOST_AUTO_TEST_CASE(Mutexed_Locked_Mut)
 {
-    Mutexed<int> mutexed(42);
+    lock_stats stats;
+    Mutexed<int, lockable_spy<std::shared_mutex>> mutexed(42, stats);
     {
         auto [lock, value] = mutexed.locked();
         static_assert(std::is_same_v<decltype(value), int &>);
         BOOST_TEST(value == 42);
+        BOOST_TEST(stats.nb_locked == 1);
+
         value += 10;
     }
+    BOOST_TEST(stats.nb_unlocked == 1);
+
+    BOOST_TEST(stats.nb_try_locked == 0);
+    BOOST_TEST(stats.nb_locked_shared == 0);
+    BOOST_TEST(stats.nb_unlocked_shared == 0);
+    BOOST_TEST(stats.nb_try_locked_shared == 0);
+
     BOOST_TEST(mutexed.get_copy() == 52);
+    BOOST_TEST(stats.nb_locked_shared == 1);
+    BOOST_TEST(stats.nb_unlocked_shared == 1);
 }
-
-
-struct instrumented_shared_mutex : std::shared_mutex {
-private:
-    static bool* has_been_shared_locked_;
-
-    std::shared_mutex& as_parent() { return *this; }
-
-public:
-    static bool has_been_shared_locked() { return *has_been_shared_locked_; }
-    static void set_flag_ref(std::reference_wrapper<bool> ref) { has_been_shared_locked_ = std::addressof(ref.get()); }
-
-    using std::shared_mutex::shared_mutex;
-
-    void lock_shared() {
-        *has_been_shared_locked_ = true;
-        as_parent().lock_shared();
-    }
-    bool try_lock_shared() {
-        *has_been_shared_locked_ = true;
-        return as_parent().try_lock_shared();
-    }
-};
-
-bool* instrumented_shared_mutex::has_been_shared_locked_ = nullptr;
 
 
 BOOST_AUTO_TEST_CASE(WithAllLocked)
 {
-    bool has_been_shared_locked = false;
-    instrumented_shared_mutex::set_flag_ref(has_been_shared_locked);
-    Mutexed<int, instrumented_shared_mutex> a(42);
+    lock_stats stats;
+    Mutexed<int, lockable_spy<std::shared_mutex>> a(42, stats);
     Mutexed<int>                            b(8);
 
     int extracted_from_const = 0;
@@ -110,14 +191,18 @@ BOOST_AUTO_TEST_CASE(WithAllLocked)
         std::cref(a), b
     );
 
+    BOOST_TEST(stats.has_been_shared_locked() == true);
+    BOOST_TEST(stats.has_been_unique_locked() == false);
     BOOST_TEST(b.get_copy() == 10);
     BOOST_TEST(extracted_from_const == 42);
-    BOOST_TEST(has_been_shared_locked == true);
+
+    // reset stats
+    stats = lock_stats();
 
     // testing if the mutex a is uniquely locked
-    has_been_shared_locked = false;
     with_all_locked([](int&, int&) {}, a, b);
-    BOOST_TEST(has_been_shared_locked == false);
+    BOOST_TEST(stats.has_been_shared_locked() == false);
+    BOOST_TEST(stats.has_been_unique_locked() == true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
