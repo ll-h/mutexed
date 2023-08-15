@@ -179,13 +179,11 @@ BOOST_AUTO_TEST_CASE(WithAllLocked)
 {
     lock_stats stats;
     Mutexed<int, lockable_spy<std::shared_mutex>> a(42, stats);
-    Mutexed<int>                            b(8);
+    Mutexed<int> b(8);
 
-    int extracted_from_const = 0;
-
-    with_all_locked([&extracted_from_const](int c, int& m) {
-            extracted_from_const = c;
-            m = 10;
+    int from_a = with_all_locked([](int in_a, int& in_b) {
+            in_b = 10;
+	    return in_a;
         },
         // pass a const& or a std::reference_wrapper<const Mutexed> to make it use lock_shared()
         std::cref(a), b
@@ -194,7 +192,7 @@ BOOST_AUTO_TEST_CASE(WithAllLocked)
     BOOST_TEST(stats.has_been_shared_locked() == true);
     BOOST_TEST(stats.has_been_unique_locked() == false);
     BOOST_TEST(b.get_copy() == 10);
-    BOOST_TEST(extracted_from_const == 42);
+    BOOST_TEST(from_a == 42);
 
     // reset stats
     stats = lock_stats();
