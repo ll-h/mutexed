@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <utility>
 #include <functional>
+#include <optional>
 
 #include <thread>
 #include <chrono>
@@ -253,24 +254,34 @@ struct flagged_int {
     bool was_initialized() const { return initialized; }
 };
 
+struct future_int : std::optional<int> {
+    void compute() { emplace(3); }
+};
+
 template<typename M>
 void test_sync() {
-    Mutexed<flagged_int, M, has_cv> init_after;
+    Mutexed<future_int, M, has_cv> init_after;
 
-    // launching the thread that should wait
-    std::thread to_do_after([&](){
-        init_after.wait([](flagged_int const& fi){ return fi.initialized; });
-        init_after.with_locked([](flagged_int& fi){ fi.val *= 3; });
+    // launching the thread that checks the result
+    bool waiting_is_over = false;
+    std::thread async_after_compute([&](){
+        init_after.wait([](future_int const& fi){ return fi.has_value(); });
+        BOOST_TEST(init_after.get_copy().value() == 3);
+        waiting_is_over = true;
     });
     // making sure it stopped at the point where it waits
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    // change and notify
-    init_after.with_locked([](flagged_int& fi){ fi.set(2); });
+    // launching the thread that computes
+    std::thread async_compute([&](){
+        // change and notify
+        init_after.with_locked(&future_int::compute);
+    });
 
-    to_do_after.join();
+    async_after_compute.join();
+    async_compute.join();
 
-    BOOST_TEST(init_after.get_copy().val == 6);
+    BOOST_TEST(waiting_is_over);
 }
 
 BOOST_AUTO_TEST_CASE(stdMutex_CV_sync)

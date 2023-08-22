@@ -29,8 +29,10 @@ void handle_socket(/* ... */)
 
 The `Mutexed` class prevents the user from accessing the data without its dedicated mutex being locked.
 
+# Full Documentation
+The full documentation of this library is available at https://ll-h.github.io/mutexed.
 
-# The Mutexed APIs
+# API Overview
 Two ways of accessing the protected data are provided :
 
 ## with structured bindings
@@ -82,7 +84,7 @@ llh::mutexed::with_all_locked([](auto& data_from_a, auto const& data_from_b) {
 
 
 # Condition-variables
-You may optionally have your `Mutexed` object hold a condition-variable by providing `llh::mutexed::has_cv` it as its last template argument.
+You may optionally have your `Mutexed` object hold a condition-variable by providing `llh::mutexed::has_cv` as its last template argument.
 
 ## Notifications
 The non-`const` versions of `with_locked()` and `locked()` will call `notify_all()` on the condition-variable after the mutex have been unlocked.
@@ -110,8 +112,8 @@ It has been tested in the following environments :
 
 # TODOs
 * test on more environments
+* copy and move constructors
 * test `auto const` for the structured bindings
-* documentation as Github pages
 * installation guide
 * make `with_all_locked` take the function as its last argument instead of first
 * provide a structure bindings API for acquiring several `Mutexed`s
