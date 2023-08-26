@@ -1,0 +1,7 @@
+<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
+<area shape="rect" id="Node000000" title=" " alt="" coords="5,5,227,51"/>
+<area shape="rect" id="Node000001" href="$classllh_1_1mutexed_1_1Mutexed.html" title="The Mutexed class is a value&#45;wrapper that protects its value with a mutex that will be referred to in..." alt="" coords="275,40,475,85"/>
+<area shape="poly" id="edge1_Node000000_Node000001" title=" " alt="" coords="241,42,275,47,274,52,240,47"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="25,75,207,120"/>
+<area shape="poly" id="edge2_Node000002_Node000001" title=" " alt="" coords="221,81,274,73,275,79,221,86"/>
+</map>

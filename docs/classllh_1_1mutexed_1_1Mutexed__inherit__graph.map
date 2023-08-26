@@ -1,0 +1,7 @@
+<map id="llh::mutexed::Mutexed&lt; T, M, H &gt;" name="llh::mutexed::Mutexed&lt; T, M, H &gt;">
+<area shape="rect" id="Node000001" title="The Mutexed class is a value&#45;wrapper that protects its value with a mutex that will be referred to in..." alt="" coords="110,99,310,144"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,5,188,51"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="136,57,185,96,181,100,132,61"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="213,5,434,51"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="288,61,239,100,235,96,284,57"/>
+</map>
